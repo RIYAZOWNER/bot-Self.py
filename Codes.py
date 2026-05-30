@@ -18,7 +18,7 @@ load_dotenv()
 BOT_TOKEN        = os.getenv("BOT_TOKEN", "8785533532:AAGNDV4bP9-tsUwWR6gMlnFhzEsQ7oztZPM")
 MONGODB_URI      = os.getenv("MONGODB_URI", "mongodb+srv://riyaziam958_db_user:EV8aPzDA0S3Ynsia@cluster0.m6dnzzo.mongodb.net/?appName=Cluster0")
 DATABASE_NAME    = os.getenv("DATABASE_NAME", "Riyazbot")
-API_URL          = os.getenv("API_URL", "http://203.57.85.87:8080/hit")
+API_URL          = os.getenv("API_URL", "http://203.57.85.87:8080")
 API_KEY          = os.getenv("API_KEY", "ROCKY_API_KEY_2026")
 ADMIN_IDS        = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "8127154833").split(",") if x.strip()]
 CHANNEL_ID       = os.getenv("CHANNEL_ID", "-1003838251427")
